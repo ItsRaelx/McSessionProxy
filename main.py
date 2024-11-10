@@ -25,7 +25,7 @@ class ProxyManager:
         self.proxies = []
         self.failed_proxies: Dict[str, float] = {}
         self.lock = asyncio.Lock()
-        self.failure_timeout = 60  # Reduced timeout to 1 minute
+        self.failure_timeout = 60
 
     async def update_proxies(self):
         async with httpx.AsyncClient() as client:
@@ -51,15 +51,12 @@ class ProxyManager:
     async def get_random_proxy(self):
         async with self.lock:
             current_time = time.time()
-
-            # Clean up old failed proxies
             self.failed_proxies = {
                 proxy: timestamp
                 for proxy, timestamp in self.failed_proxies.items()
                 if current_time - timestamp < self.failure_timeout
             }
 
-            # Get all available proxies (excluding recently failed ones)
             available_proxies = [p for p in self.proxies if p not in self.failed_proxies]
 
             if available_proxies:
@@ -104,7 +101,6 @@ async def make_request_with_retries(request, target_url, headers, body, max_retr
                     params=request.query_params,
                 )
 
-                # Don't raise_for_status here to handle all responses
                 if response.status_code == 200:
                     log_message(f"✅ Request successful - Status: {response.status_code}")
                     return response
@@ -131,17 +127,27 @@ async def proxy_request(request: Request, path: str):
     response = await make_request_with_retries(request, target_url, headers, body)
 
     if response:
-        # Create new response with exact content and headers
         content = await response.aread()
+        headers = dict(response.headers)
+
+        # Remove problematic headers
+        headers.pop('content-encoding', None)
+        headers.pop('transfer-encoding', None)
+
+        # Set correct content length
+        headers['content-length'] = str(len(content))
+
         return Response(
             content=content,
             status_code=response.status_code,
-            headers=dict(response.headers)
+            headers=headers
         )
     else:
+        error_content = b"All attempts failed. Unable to complete the request."
         return Response(
-            content=b"All attempts failed. Unable to complete the request.",
-            status_code=500
+            content=error_content,
+            status_code=500,
+            headers={'content-length': str(len(error_content))}
         )
 
 

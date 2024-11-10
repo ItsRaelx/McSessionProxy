@@ -5,7 +5,7 @@ import asyncio
 import uvicorn
 import os
 import dotenv
-from typing import Dict, Set
+from typing import Dict
 import time
 from datetime import datetime
 
@@ -24,9 +24,8 @@ class ProxyManager:
     def __init__(self):
         self.proxies = []
         self.failed_proxies: Dict[str, float] = {}
-        self.working_proxies: Set[str] = set()
         self.lock = asyncio.Lock()
-        self.failure_timeout = 300
+        self.failure_timeout = 60  # Reduced timeout to 1 minute
 
     async def update_proxies(self):
         async with httpx.AsyncClient() as client:
@@ -45,7 +44,6 @@ class ProxyManager:
                 async with self.lock:
                     self.proxies = new_proxies
                     log_message(f"✅ Proxies updated. Total proxies: {len(self.proxies)}")
-                    log_message(f"📊 Stats - Working: {len(self.working_proxies)}, Failed: {len(self.failed_proxies)}")
 
             except httpx.RequestError as e:
                 log_message(f"❌ Failed to download proxies: {e}")
@@ -55,21 +53,14 @@ class ProxyManager:
             current_time = time.time()
 
             # Clean up old failed proxies
-            old_failed_count = len(self.failed_proxies)
             self.failed_proxies = {
                 proxy: timestamp
                 for proxy, timestamp in self.failed_proxies.items()
                 if current_time - timestamp < self.failure_timeout
             }
-            if old_failed_count != len(self.failed_proxies):
-                log_message(f"🔄 Cleared {old_failed_count - len(self.failed_proxies)} expired failed proxies")
 
-            # Prefer working proxies
-            available_proxies = list(self.working_proxies - set(self.failed_proxies.keys()))
-
-            # If no working proxies, try unused ones
-            if not available_proxies:
-                available_proxies = [p for p in self.proxies if p not in self.failed_proxies]
+            # Get all available proxies (excluding recently failed ones)
+            available_proxies = [p for p in self.proxies if p not in self.failed_proxies]
 
             if available_proxies:
                 proxy = random.choice(available_proxies)
@@ -82,15 +73,7 @@ class ProxyManager:
     async def mark_proxy_failed(self, proxy: str):
         async with self.lock:
             self.failed_proxies[proxy] = time.time()
-            self.working_proxies.discard(proxy)
             log_message(f"❌ Marked proxy as failed: {proxy}")
-
-    async def mark_proxy_working(self, proxy: str):
-        async with self.lock:
-            self.working_proxies.add(proxy)
-            if proxy in self.failed_proxies:
-                del self.failed_proxies[proxy]
-            log_message(f"✅ Marked proxy as working: {proxy}")
 
 
 proxy_manager = ProxyManager()
@@ -121,22 +104,17 @@ async def make_request_with_retries(request, target_url, headers, body, max_retr
                     params=request.query_params,
                 )
 
-                try:
-                    response.raise_for_status()
-                    response_text = response.text
-                    await proxy_manager.mark_proxy_working(proxy)
+                # Don't raise_for_status here to handle all responses
+                if response.status_code == 200:
                     log_message(f"✅ Request successful - Status: {response.status_code}")
                     return response
-                except UnicodeDecodeError:
+                else:
                     await proxy_manager.mark_proxy_failed(proxy)
-                    log_message(f"❌ Corrupted response from proxy: {proxy}")
+                    log_message(f"⚠️ Request failed - Status: {response.status_code}")
                     continue
 
-        except httpx.HTTPStatusError as e:
-            log_message(f"❌ HTTP Error: {e.response.status_code} - Proxy: {proxy}")
-            await proxy_manager.mark_proxy_failed(proxy)
-        except (httpx.RequestError, httpx.ProxyError, httpx.ConnectTimeout) as e:
-            log_message(f"❌ Connection Error: {str(e)} - Proxy: {proxy}")
+        except Exception as e:
+            log_message(f"❌ Error with proxy {proxy}: {str(e)}")
             await proxy_manager.mark_proxy_failed(proxy)
 
     log_message("❌ All retry attempts failed")
@@ -153,13 +131,18 @@ async def proxy_request(request: Request, path: str):
     response = await make_request_with_retries(request, target_url, headers, body)
 
     if response:
+        # Create new response with exact content and headers
+        content = await response.aread()
         return Response(
-            content=response.content,
+            content=content,
             status_code=response.status_code,
-            headers={key: value for key, value in response.headers.items() if key.lower() != 'content-encoding'}
+            headers=dict(response.headers)
         )
     else:
-        return Response(content="All attempts failed. Unable to complete the request.", status_code=500)
+        return Response(
+            content=b"All attempts failed. Unable to complete the request.",
+            status_code=500
+        )
 
 
 async def update_proxies_periodically():

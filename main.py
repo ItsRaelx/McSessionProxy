@@ -1,13 +1,14 @@
-from fastapi import FastAPI, Request, Response
-import httpx
-import random
 import asyncio
-import uvicorn
 import os
-import dotenv
-from typing import Dict
+import random
 import time
 from datetime import datetime
+from typing import Dict
+
+import dotenv
+import httpx
+import uvicorn
+from fastapi import FastAPI, Request, Response
 
 dotenv.load_dotenv()
 
@@ -101,7 +102,8 @@ async def make_request_with_retries(request, target_url, headers, body, max_retr
                     params=request.query_params,
                 )
 
-                if response.status_code == 200:
+                # Consider both 200 and 204 as successful responses
+                if response.status_code in (200, 204):
                     log_message(f"✅ Request successful - Status: {response.status_code}")
                     return response
                 else:
